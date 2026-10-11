@@ -10,6 +10,8 @@ The first release uses Python's standard library and SQLite. It has no Python pa
 - Responsive cashier and employee order-taking interface
 - Product catalog with custom categories, SKU/barcode field, photos, prices, and stock
 - Shared orders, cash checkout, manually confirmed DuitNow QR, cash change, receipt numbers, and printer-friendly receipts
+- Scan-to-order: per-table QR codes; customers order and pay online without logging in (Malaysian e-wallets, Apple Pay, Google Pay, cards, FPX through a payment gateway)
+- Full and partial refunds (online refunds go back through the gateway) and a live daily settlement with day closing and CSV export
 - Stock deduction on settlement and protection against settling an order twice
 - Expense ledger, daily sales summary, tax setting, and downloadable data backup
 - Bahasa Melayu, English, and Simplified Chinese interface
@@ -48,6 +50,64 @@ Google connection must be started in a browser on the **main computer** at `http
 6. Select **Connect Google**, approve access, then select **Sync now**. Automatic sync retries while the host has internet access.
 
 The integration uses Google's `drive.file` scope and the Google account's email scope. It stores the refresh token in the shop's local SQLite database; protect the host computer and backup files. Google OAuth setup and verification requirements depend on how the open-source project is distributed.
+
+## Scan-to-order and online payments
+
+### How it works
+
+1. Each table has a QR code pointing to `/order?table=<code>`. The code is random, so tables can't be guessed.
+2. The customer picks dishes and a payment method. The server prices the cart from the database (prices sent by the phone are ignored) and creates a *checkout session* and a pending *payment*. It then sends the customer to the gateway's payment page.
+3. The gateway reports the result with a **signed webhook** to `/api/payments/webhook/<provider>`. The server:
+   - verifies the signature and the amount, then creates the order as `paid`, deducts stock and assigns the receipt number, all in one transaction;
+   - ignores repeated webhooks, so a retried webhook never creates a second order;
+   - if an item sold out while the customer was paying, refunds the payment automatically instead of creating an order.
+4. The order shows up in the POS with its table and a sound alert. The customer's phone shows the receipt.
+
+Unpaid checkouts never appear in the POS. Data lives in the `dining_tables`, `checkout_sessions`, `payments`, `refunds` and `day_closings` tables. The code is in `ordering.py`.
+
+### Making it reachable from customers' phones
+
+Customers on mobile data cannot reach a computer on the shop LAN. The recommended setup keeps the POS on the shop computer and publishes it through **Cloudflare Tunnel** (free, no router or firewall changes):
+
+```bash
+# one-off test URL (changes every time it starts)
+cloudflared tunnel --url http://localhost:8765
+# for daily use, create a named tunnel with your own domain, e.g. order.your-shop.com:
+# https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+```
+
+Enter the resulting `https://` address in **Settings → Scan-to-order → Public address**, then print the table QR codes.
+
+**Security model.** Any request that arrives through the tunnel or another reverse proxy can only reach the customer pages, the public API, the payment webhook and product images. That means any request with a `Cf-Connecting-Ip` or `X-Forwarded-For` header, or one whose `Host` matches the public address. The cashier screen, login, settings, backups and every staff or owner API return `404` from the internet. Checkouts are rate-limited per device.
+
+### Payment gateway
+
+Taking Malaysian e-wallets, Apple Pay and Google Pay requires a merchant account with a payment gateway. Fiuu (formerly Razer Merchant Services), Stripe, iPay88 and Billplz are common choices. The application is made by the business, usually with its SSM registration.
+
+This release ships **`MockGateway`**, a simulated hosted checkout that exercises the whole flow, including signed webhooks and refunds, without moving money. The customer page, the payment page and the POS settings all show a *test mode* warning while it is active.
+
+To connect a real provider, add a class in `ordering.py` with the same three methods and return it from `gateway()`:
+
+| Method | Responsibility |
+|---|---|
+| `create(session) -> {provider_ref, redirect_url}` | Create the payment with the provider and return where to send the customer |
+| `verify_webhook(headers, raw_body) -> {provider_ref, status, amount_cents}` | Check the provider's signature and normalise its event (`succeeded` / `failed`) |
+| `refund(payment, amount_cents) -> provider_refund_ref` | Refund all or part of a captured payment |
+
+Point the provider's webhook/callback URL at `https://<public address>/api/payments/webhook/<provider>`. Keep the provider's secret keys out of the repository. Read them from environment variables on the shop computer.
+
+### Refunds and settlement rules
+
+- **Refunds:** owners refund paid orders fully or partially.
+  - Online payments are refunded through the gateway.
+  - Cash and DuitNow refunds are recorded after the money is handed back.
+  - A full refund can restock the items; partial refunds never restock.
+  - A refund is recorded on the day it is made. Its order keeps its original sale date.
+- **Settlement** (`/api/settlement?day=YYYY-MM-DD`):
+  - Gross sales are paid orders by payment date; refunds are counted by refund date; net = gross − refunds.
+  - Breakdowns by method, tax, expenses and expected cash in the drawer (cash sales − cash refunds).
+  - **Close the day** stores a snapshot with the counted cash and the variance.
+  - `/api/settlement/export` downloads a CSV that opens in Excel, for the accountant.
 
 ## Data, backup, and restore
 
