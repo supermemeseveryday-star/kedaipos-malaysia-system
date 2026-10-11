@@ -1,0 +1,10 @@
+# Shop data and backups contain customer, sales and credential data. Never commit them.
+kedai-pos/data/
+*.sqlite3
+*.sqlite3-*
+kedai-pos-backup-*.zip
+
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
