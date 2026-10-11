@@ -124,6 +124,31 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertNotIn("UNIQUE", body["error"])
 
+    def test_login_locks_after_repeated_failures(self):
+        self.owner.call("POST", "/api/users", {"username": "kasim", "display_name": "Kasim", "password": "password123"})
+        client = Client(self.owner.base)
+        try:
+            for _ in range(server.LOGIN_MAX_PER_ACCOUNT):
+                self.assertEqual(client.call("POST", "/api/login", {"username": "kasim", "password": "wrong-pass"})[0], 401)
+            status, body = client.call("POST", "/api/login", {"username": "kasim", "password": "password123"})
+            self.assertEqual(status, 429)
+            self.assertGreater(body["retry_after"], 0)
+            # Another account on the same device is not locked out.
+            self.assertEqual(client.call("POST", "/api/login", {"username": "ali", "password": "password123"})[0], 200)
+        finally:
+            server.LOGIN_FAILURES.clear()
+
+    def test_successful_login_resets_failures(self):
+        client = Client(self.owner.base)
+        try:
+            for _ in range(server.LOGIN_MAX_PER_ACCOUNT - 1):
+                client.call("POST", "/api/login", {"username": "ali", "password": "wrong-pass"})
+            self.assertEqual(client.call("POST", "/api/login", {"username": "ali", "password": "password123"})[0], 200)
+            self.assertEqual(client.call("POST", "/api/login", {"username": "ali", "password": "wrong-pass"})[0], 401)
+            self.assertEqual(client.call("POST", "/api/login", {"username": "ali", "password": "password123"})[0], 200)
+        finally:
+            server.LOGIN_FAILURES.clear()
+
     def test_tax_applied_to_new_orders(self):
         self.owner.call("POST", "/api/settings", {"tax_enabled": True, "tax_rate": 6})
         try:

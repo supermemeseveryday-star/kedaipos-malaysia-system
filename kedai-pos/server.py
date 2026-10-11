@@ -35,6 +35,10 @@ PORT = int(os.environ.get("KEDAI_PORT", "8765"))
 MAX_BODY = 10 * 1024 * 1024
 DB_LOCK = threading.RLock()
 SESSIONS: dict[str, tuple[int, float]] = {}
+LOGIN_FAILURES: dict[str, list[float]] = {}
+LOGIN_WINDOW = 15 * 60
+LOGIN_MAX_PER_ACCOUNT = 5
+LOGIN_MAX_PER_DEVICE = 20
 OAUTH_STATES: dict[str, tuple[int, float, str]] = {}
 GOOGLE_TOKEN_CACHE: tuple[str, float] | None = None
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email"
@@ -197,6 +201,30 @@ def path_id(path: str, index: int) -> int:
         return int(path.split("/")[index])
     except (IndexError, ValueError):
         raise NotFound() from None
+
+
+def login_keys(ip: str, username: str) -> tuple[str, str]:
+    return f"{ip}|{username}", ip
+
+
+def login_retry_after(ip: str, username: str) -> int:
+    """Seconds until this device may try this account again; 0 when allowed."""
+    now = time.time()
+    wait = 0
+    for key, limit in zip(login_keys(ip, username), (LOGIN_MAX_PER_ACCOUNT, LOGIN_MAX_PER_DEVICE)):
+        recent = [t for t in LOGIN_FAILURES.get(key, []) if t > now - LOGIN_WINDOW]
+        if recent:
+            LOGIN_FAILURES[key] = recent
+        else:
+            LOGIN_FAILURES.pop(key, None)
+        if len(recent) >= limit:
+            wait = max(wait, math.ceil(recent[-limit] + LOGIN_WINDOW - now))
+    return wait
+
+
+def record_login_failure(ip: str, username: str) -> None:
+    for key in login_keys(ip, username):
+        LOGIN_FAILURES.setdefault(key, []).append(time.time())
 
 
 def http_json(url, method="GET", payload=None, headers=None, form=False):
@@ -605,9 +633,18 @@ class Handler(BaseHTTPRequestHandler):
                                       headers={"Set-Cookie": f"kedai_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600"})
             if path == "/api/login":
                 username = str(body.get("username", "")).strip().lower()
+                ip = self.client_address[0]
+                wait = login_retry_after(ip, username)
+                if wait:
+                    minutes = max(1, math.ceil(wait / 60))
+                    return self.send_json({"error": f"Too many failed sign-in attempts. Try again in {minutes} min.", "retry_after": wait},
+                                          429, {"Retry-After": str(wait)})
                 row = db.execute("SELECT * FROM users WHERE username=? AND active=1", (username,)).fetchone()
                 if not row or not check_password(str(body.get("password", "")), row["password_hash"]):
+                    record_login_failure(ip, username)
+                    audit(db, None, "login_failed", "user", username, {"ip": ip})
                     return self.send_json({"error": "Incorrect username or password"}, 401)
+                LOGIN_FAILURES.pop(login_keys(ip, username)[0], None)
                 token = secrets.token_urlsafe(32)
                 SESSIONS[token] = (row["id"], time.time()+60*60*24*14)
                 return self.send_json({"user": {"id":row["id"],"username":row["username"],"display_name":row["display_name"],"role":row["role"]}},
