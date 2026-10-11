@@ -81,8 +81,14 @@ This is an initial open-source release, not certified accounting, SST, or MyInvo
 
 ## Development
 
-No third-party runtime dependencies are currently required. Source is in `server.py` and `static/`. See `docs/plans/` for the approved product design and implementation plan.
+No third-party runtime dependencies are currently required. Source is in `server.py` and `static/`.
 
-## Publish to GitHub
+Run the API tests (they use a temporary data folder and never touch `data/`):
 
-See [`docs/github-publishing.md`](docs/github-publishing.md) for steps to publish this local repository. Keep the shop's `data/` directory and OAuth credentials out of the public repository.
+```
+python -m unittest discover -s tests
+```
+
+## Publishing
+
+The repository's `.gitignore` excludes `data/`, SQLite files, and backup ZIPs. Keep the shop's `data/` directory, backups, and Google OAuth credentials out of any public repository.

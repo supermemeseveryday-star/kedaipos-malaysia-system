@@ -187,6 +187,18 @@ def finite_number(value, label: str, minimum: float = 0, maximum: float = 1_000_
     return number
 
 
+class NotFound(Exception):
+    """Raised for API paths that do not name a valid record; answered with 404."""
+
+
+def path_id(path: str, index: int) -> int:
+    """Return the numeric id segment of an API path, or raise NotFound."""
+    try:
+        return int(path.split("/")[index])
+    except (IndexError, ValueError):
+        raise NotFound() from None
+
+
 def http_json(url, method="GET", payload=None, headers=None, form=False):
     data = None
     h = dict(headers or {})
@@ -430,6 +442,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = self.read_json()
                 return self.api_post(path, body)
+            except NotFound:
+                return self.send_json({"error": "Not found"}, 404)
+            except sqlite3.IntegrityError as exc:
+                if "users.username" in str(exc):
+                    return self.send_json({"error": "That username is already taken"}, 409)
+                return self.send_json({"error": "Request conflicts with existing data"}, 409)
             except (ValueError, json.JSONDecodeError) as exc:
                 return self.send_json({"error": str(exc) or "Invalid request"}, 400)
             except Exception as exc:
@@ -442,12 +460,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self.read_json()
             return self.api_put(path, body)
+        except NotFound:
+            return self.send_json({"error": "Not found"}, 404)
         except Exception as exc:
             return self.send_json({"error": str(exc)}, 400)
 
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path
-        return self.api_delete(path)
+        try:
+            return self.api_delete(path)
+        except NotFound:
+            return self.send_json({"error": "Not found"}, 404)
 
     def serve_static(self, path):
         if path.startswith("/uploads/"):
@@ -701,7 +724,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/orders/") and path.endswith("/pay"):
                 if user["role"] not in ("owner","staff"):
                     return self.send_json({"error":"Access denied"},403)
-                oid=int(path.split("/")[3]); method=str(body.get("method",""))
+                oid=path_id(path,3); method=str(body.get("method",""))
                 if method not in ("cash","qr"):
                     return self.send_json({"error":"Choose cash or DuitNow QR"},400)
                 db.execute("BEGIN IMMEDIATE")
@@ -711,11 +734,16 @@ class Handler(BaseHTTPRequestHandler):
                 if order["status"]!="open":
                     db.rollback(); return self.send_json({"error":"This order is already settled or closed"},409)
                 lines=db.execute("SELECT * FROM order_items WHERE order_id=?",(oid,)).fetchall()
+                # Sum per product so an item split across several lines cannot oversell.
+                needed={}
                 for line in lines:
                     if line["product_id"] is not None:
-                        product=db.execute("SELECT stock FROM products WHERE id=?",(line["product_id"],)).fetchone()
-                        if product and product["stock"] < line["quantity"]:
-                            db.rollback(); return self.send_json({"error":f"Not enough stock for {line['product_name']}"},409)
+                        qty,name=needed.get(line["product_id"],(0,line["product_name"]))
+                        needed[line["product_id"]]=(qty+line["quantity"],name)
+                for pid,(qty,name) in needed.items():
+                    product=db.execute("SELECT stock FROM products WHERE id=?",(pid,)).fetchone()
+                    if product and product["stock"] < qty:
+                        db.rollback(); return self.send_json({"error":f"Not enough stock for {name}"},409)
                 receipt=f"KED-{datetime.now(business_zone()).strftime('%y%m%d')}-{oid:05d}"
                 paid=now_iso()
                 try:
@@ -736,7 +764,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/orders/") and path.endswith("/refund"):
                 if user["role"] != "owner":
                     return self.send_json({"error":"Owner access required"},403)
-                oid=int(path.split("/")[3]);db.execute("BEGIN IMMEDIATE")
+                oid=path_id(path,3);db.execute("BEGIN IMMEDIATE")
                 order=db.execute("SELECT * FROM orders WHERE id=?",(oid,)).fetchone()
                 if not order:
                     db.rollback();return self.send_json({"error":"Order not found"},404)
@@ -830,7 +858,7 @@ class Handler(BaseHTTPRequestHandler):
         with DB_LOCK,connect() as db:
             if path.startswith("/api/products/"):
                 if user["role"]!="owner":return self.send_json({"error":"Owner access required"},403)
-                pid=int(path.rsplit("/",1)[1]); row=db.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone()
+                pid=path_id(path,3); row=db.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone()
                 if not row:return self.send_json({"error":"Product not found"},404)
                 name=str(body.get("name",row["name"])).strip()
                 price=round(finite_number(body.get("price",row["price_cents"]/100), "Price")*100)
@@ -842,7 +870,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok":True})
             if path.startswith("/api/users/"):
                 if user["role"]!="owner":return self.send_json({"error":"Owner access required"},403)
-                uid=int(path.rsplit("/",1)[1])
+                uid=path_id(path,3)
                 if uid==user["id"]:return self.send_json({"error":"Use another owner to disable this account"},400)
                 active=1 if body.get("active",True) else 0
                 db.execute("UPDATE users SET active=? WHERE id=? AND role='staff'",(active,uid))
@@ -854,13 +882,13 @@ class Handler(BaseHTTPRequestHandler):
         user=self.require_user(owner=True)
         if not user:return
         if path.startswith("/api/products/"):
-            pid=int(path.rsplit("/",1)[1])
+            pid=path_id(path,3)
             with DB_LOCK,connect() as db:
                 db.execute("UPDATE products SET active=0,updated_at=? WHERE id=?",(now_iso(),pid))
                 audit(db,user["id"],"archive","product",pid)
             return self.send_json({"ok":True})
         if path.startswith("/api/orders/"):
-            oid=int(path.rsplit("/",1)[1])
+            oid=path_id(path,3)
             with DB_LOCK,connect() as db:
                 row=db.execute("SELECT status FROM orders WHERE id=?",(oid,)).fetchone()
                 if not row:return self.send_json({"error":"Order not found"},404)
