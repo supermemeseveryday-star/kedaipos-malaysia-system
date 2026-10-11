@@ -1,0 +1,21 @@
+{
+  "name": "kedai-pos-video",
+  "private": true,
+  "description": "Remotion project for the Kedai POS introduction video (Chinese voiceover, bilingual subtitles)",
+  "scripts": {
+    "assets": "node scripts/copy-screens.mjs",
+    "studio": "npm run assets && remotion studio",
+    "render": "npm run assets && remotion render KedaiPosIntro out/kedai-pos-intro.mp4",
+    "still": "npm run assets && remotion still KedaiPosIntro"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.534",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.534"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.12",
+    "typescript": "5.9.2"
+  }
+}

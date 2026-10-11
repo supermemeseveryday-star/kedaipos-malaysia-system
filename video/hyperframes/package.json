@@ -1,0 +1,13 @@
+{
+  "name": "kedai-pos-video-hyperframes",
+  "private": true,
+  "description": "HyperFrames intro/outro compositions and local TTS for the Kedai POS video",
+  "scripts": {
+    "render:intro": "hyperframes render intro -o ../remotion/public/hf/intro.mp4 -q high",
+    "render:outro": "hyperframes render outro -o ../remotion/public/hf/outro.mp4 -q high"
+  },
+  "dependencies": {
+    "gsap": "3.13.0",
+    "hyperframes": "0.8.146"
+  }
+}

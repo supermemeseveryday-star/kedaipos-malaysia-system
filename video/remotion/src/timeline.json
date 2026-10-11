@@ -1,0 +1,185 @@
+{
+  "voice": "zf_xiaobei",
+  "scenes": [
+    {
+      "id": "intro",
+      "kind": "hyperframes",
+      "seconds": 13.767,
+      "lines": [
+        {
+          "zh": "开小店的老板，还在用纸笔记账吗？",
+          "en": "Still keeping your shop's accounts on paper?",
+          "file": "voice/intro-1.wav",
+          "seconds": 4.075,
+          "start": 0.8
+        },
+        {
+          "zh": "收银系统月费太贵，网络一断就停摆？",
+          "en": "POS subscriptions too pricey, and useless when the internet drops?",
+          "file": "voice/intro-2.wav",
+          "seconds": 4.267,
+          "start": 5.225
+        },
+        {
+          "zh": "试试 Kedai POS。",
+          "en": "Meet Kedai POS.",
+          "file": "voice/intro-3.wav",
+          "seconds": 2.325,
+          "start": 9.842
+        }
+      ]
+    },
+    {
+      "id": "overview",
+      "image": "02-checkout.png",
+      "seconds": 17.401,
+      "lines": [
+        {
+          "zh": "这是一套为马来西亚小店打造的开源收银系统，完全免费。",
+          "en": "An open-source POS built for Malaysian small shops, completely free.",
+          "file": "voice/overview-1.wav",
+          "seconds": 6.891,
+          "start": 0.5
+        },
+        {
+          "zh": "只要一台店里的电脑，员工就能用手机或平板，通过店里的无线网络点单收银。",
+          "en": "Run it on one shop computer, and staff can take orders on phones or tablets over the shop Wi-Fi.",
+          "file": "voice/overview-2.wav",
+          "seconds": 8.96,
+          "start": 7.741
+        }
+      ]
+    },
+    {
+      "id": "checkout",
+      "image": "02-checkout.png",
+      "seconds": 9.721,
+      "lines": [
+        {
+          "zh": "点一下商品，就能加入购物车。",
+          "en": "Tap a product to add it to the cart.",
+          "file": "voice/checkout-1.wav",
+          "seconds": 3.136,
+          "start": 0.5
+        },
+        {
+          "zh": "可以按分类筛选，也能用扫码枪直接扫条码。",
+          "en": "Filter by category, or scan barcodes straight in.",
+          "file": "voice/checkout-2.wav",
+          "seconds": 5.035,
+          "start": 3.986
+        }
+      ]
+    },
+    {
+      "id": "payment",
+      "images": [
+        "03-cash-payment.png",
+        "04-qr-payment.png"
+      ],
+      "seconds": 8.611,
+      "lines": [
+        {
+          "zh": "现金收款，自动计算找零。",
+          "en": "Cash payments work out the change for you.",
+          "file": "voice/payment-1.wav",
+          "seconds": 3.285,
+          "start": 0.5
+        },
+        {
+          "zh": "也支持 DuitNow QR 扫码付款。",
+          "en": "DuitNow QR payments are supported too.",
+          "file": "voice/payment-2.wav",
+          "seconds": 3.776,
+          "start": 4.135
+        }
+      ]
+    },
+    {
+      "id": "receipt",
+      "images": [
+        "05-orders.png",
+        "06-receipt.png"
+      ],
+      "seconds": 6.683,
+      "lines": [
+        {
+          "zh": "付款后自动扣库存，马上生成收据，可以直接打印。",
+          "en": "Stock is deducted on payment, and a receipt is ready to print.",
+          "file": "voice/receipt-1.wav",
+          "seconds": 5.483,
+          "start": 0.5
+        }
+      ]
+    },
+    {
+      "id": "owner",
+      "images": [
+        "07-products.png",
+        "10-reports.png"
+      ],
+      "seconds": 9.956,
+      "lines": [
+        {
+          "zh": "老板可以管理商品和库存，记录每一笔支出，",
+          "en": "Owners manage products and stock, and record every expense,",
+          "file": "voice/owner-1.wav",
+          "seconds": 4.395,
+          "start": 0.5
+        },
+        {
+          "zh": "一眼就能看到今天的营业额和净收入。",
+          "en": "with today's sales and net income at a glance.",
+          "file": "voice/owner-2.wav",
+          "seconds": 4.011,
+          "start": 5.245
+        }
+      ]
+    },
+    {
+      "id": "anywhere",
+      "images": [
+        "12-phone-zh.png",
+        "13-phone-cart-zh.png"
+      ],
+      "seconds": 11.321,
+      "lines": [
+        {
+          "zh": "界面支持中文、英文和马来文。",
+          "en": "Available in Chinese, English and Malay.",
+          "file": "voice/anywhere-1.wav",
+          "seconds": 3.883,
+          "start": 0.5
+        },
+        {
+          "zh": "数据只保存在你自己的电脑里，断网也能照常开工。",
+          "en": "Your data stays on your own computer, and it keeps working offline.",
+          "file": "voice/anywhere-2.wav",
+          "seconds": 5.888,
+          "start": 4.733
+        }
+      ]
+    },
+    {
+      "id": "outro",
+      "kind": "hyperframes",
+      "seconds": 10.536,
+      "lines": [
+        {
+          "zh": "Kedai POS，让小店收银更简单。",
+          "en": "Kedai POS: checkout made simple for small shops.",
+          "file": "voice/outro-1.wav",
+          "seconds": 4.053,
+          "start": 0.8
+        },
+        {
+          "zh": "现在就到 GitHub 免费下载吧。",
+          "en": "Download it free on GitHub today.",
+          "file": "voice/outro-2.wav",
+          "seconds": 3.733,
+          "start": 5.203
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+node_modules/
+# Generated media: rebuild with the steps in video/README.md
+remotion/out/
+remotion/public/voice/
+remotion/public/hf/
+remotion/public/screens/
+hyperframes/.vars-*.json
+hyperframes/renders/
