@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#1d2a6b">
+  <title>测试支付 · Test payment</title>
+  <link rel="stylesheet" href="/order.css">
+</head>
+<body class="mockpay">
+  <main class="pay-sheet" id="pay">
+    <div class="test-ribbon">测试模式 · TEST MODE — 不会扣款 No money is charged</div>
+    <p class="muted center" id="loading">…</p>
+  </main>
+  <script>
+    const ref = new URLSearchParams(location.search).get('ref') || '';
+    const box = document.getElementById('pay');
+    const rm = c => 'RM ' + (c / 100).toFixed(2);
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    async function load() {
+      const res = await fetch('/api/public/mock-payment?ref=' + encodeURIComponent(ref));
+      const p = await res.json();
+      if (!res.ok) { document.getElementById('loading').textContent = p.error || 'Payment not found'; return; }
+      if (p.status !== 'pending') { location.replace('/order?session=' + encodeURIComponent(p.session)); return; }
+      box.innerHTML = `<div class="test-ribbon">测试模式 · TEST MODE — 不会扣款 No money is charged</div>
+        <div class="pay-brand">${esc(p.method_label)}</div>
+        <p class="muted center">Kedai POS · 模拟支付网关 Simulated gateway</p>
+        <div class="pay-amount">${rm(p.amount_cents)}</div>
+        <button class="btn primary wide big" id="approve">确认付款 · Pay ${rm(p.amount_cents)}</button>
+        <button class="btn ghost wide" id="decline">取消 / 付款失败 · Cancel</button>`;
+      document.getElementById('approve').onclick = () => finish(true, p.session);
+      document.getElementById('decline').onclick = () => finish(false, p.session);
+    }
+    async function finish(approve, session) {
+      box.querySelectorAll('button').forEach(b => (b.disabled = true));
+      await fetch('/api/public/mock-payment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref, approve }) });
+      location.replace('/order?session=' + encodeURIComponent(session));
+    }
+    load();
+  </script>
+</body>
+</html>

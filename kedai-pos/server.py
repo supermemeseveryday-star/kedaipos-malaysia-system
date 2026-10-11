@@ -25,6 +25,8 @@ from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import ordering
+
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 DATA = Path(os.environ.get("KEDAI_DATA_DIR", ROOT / "data"))
@@ -40,6 +42,12 @@ LOGIN_WINDOW = 15 * 60
 LOGIN_MAX_PER_ACCOUNT = 5
 LOGIN_MAX_PER_DEVICE = 20
 OAUTH_STATES: dict[str, tuple[int, float, str]] = {}
+CHECKOUT_HITS: dict[str, list[float]] = {}
+CHECKOUT_WINDOW = 10 * 60
+CHECKOUT_MAX_PER_DEVICE = 30
+# Paths a customer may reach from the internet (through the tunnel). Everything else is shop-only.
+PUBLIC_PATHS = ("/order", "/order.html", "/order.js", "/order.css", "/pay/mock", "/mockpay.html", "/favicon.ico")
+PUBLIC_PREFIXES = ("/api/public/", "/api/payments/webhook/", "/uploads/")
 GOOGLE_TOKEN_CACHE: tuple[str, float] | None = None
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email"
 
@@ -152,6 +160,12 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
         CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
         """)
+        ordering.migrate(db, now_iso, pass_hash)
+        ordering.ensure_secrets(db, setting, set_setting)
+
+
+def business_now() -> datetime:
+    return datetime.now(business_zone())
 
 
 def as_dict(row):
@@ -443,6 +457,79 @@ class Handler(BaseHTTPRequestHandler):
             row = db.execute("SELECT id,username,display_name,role,active FROM users WHERE id=?", (item[0],)).fetchone()
             return as_dict(row) if row and row["active"] else None
 
+    def peer_is_local(self) -> bool:
+        try:
+            return ipaddress.ip_address(self.client_address[0]).is_loopback
+        except ValueError:
+            return False
+
+    def is_public_request(self) -> bool:
+        """True when the request came in from the internet (Cloudflare Tunnel or another reverse proxy)."""
+        if self.headers.get("Cf-Connecting-Ip") or self.headers.get("X-Forwarded-For"):
+            return True
+        host = (self.headers.get("Host") or "").split(":")[0].lower()
+        with connect() as db:
+            public = urllib.parse.urlsplit(str(setting(db, "public_base_url", "") or "")).hostname or ""
+        return bool(public) and host == public.lower()
+
+    def client_ip(self) -> str:
+        forwarded = self.headers.get("Cf-Connecting-Ip")
+        if forwarded and self.peer_is_local():
+            return forwarded.strip()[:64]
+        return self.client_address[0]
+
+    def public_blocked(self, path: str) -> bool:
+        """Internet visitors may only reach the customer ordering pages; the POS itself stays on the shop network."""
+        if not self.is_public_request():
+            return False
+        return not (path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES))
+
+    def send_bytes(self, raw: bytes, content_type: str, headers=None):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def checkout_allowed(self) -> bool:
+        ip, now = self.client_ip(), time.time()
+        recent = [t for t in CHECKOUT_HITS.get(ip, []) if t > now - CHECKOUT_WINDOW]
+        if len(recent) >= CHECKOUT_MAX_PER_DEVICE:
+            CHECKOUT_HITS[ip] = recent
+            return False
+        CHECKOUT_HITS[ip] = recent + [now]
+        return True
+
+    def public_get(self, path, query):
+        """Customer endpoints: no login."""
+        arg = lambda k: (query.get(k) or [""])[0]
+        with connect() as db:
+            if path == "/api/public/menu":
+                return self.send_json(ordering.public_menu(db, setting, arg("table")))
+            if path.startswith("/api/public/checkout/"):
+                return self.send_json(ordering.checkout_status(db, path.rsplit("/", 1)[1]))
+            if path == "/api/public/mock-payment":
+                return self.send_json(ordering.mock_payment_page(db, arg("ref")))
+        return self.send_json({"error": "Not found"}, 404)
+
+    def public_post(self, path, raw: bytes):
+        with DB_LOCK, connect() as db:
+            if path == "/api/payments/webhook/mock":
+                return self.send_json(ordering.handle_webhook(db, setting, now_iso, audit, business_now, self.headers, raw))
+            body = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+            if not isinstance(body, dict):
+                raise ValueError("Invalid request")
+            if path == "/api/public/checkout":
+                if not self.checkout_allowed():
+                    return self.send_json({"error": "Too many orders from this device. Please wait a few minutes."}, 429)
+                return self.send_json(ordering.create_checkout(db, setting, now_iso, body, self.client_ip()), 201)
+            if path == "/api/public/mock-payment":
+                return self.send_json(ordering.mock_complete(db, setting, now_iso, audit, business_now, body))
+        return self.send_json({"error": "Not found"}, 404)
+
     def require_user(self, owner=False):
         user = self.user()
         if not user:
@@ -456,7 +543,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if self.public_blocked(path):
+            return self.send_error(404)
+        if path.startswith("/api/public/"):
+            try:
+                return self.public_get(path, urllib.parse.parse_qs(parsed.query))
+            except ordering.OrderingError as exc:
+                return self.send_json({"error": str(exc)}, exc.status)
         if path.startswith("/api/"):
+            self.query = urllib.parse.parse_qs(parsed.query)
             if path == "/api/google/connect":
                 return self.google_connect()
             if path == "/api/google/callback":
@@ -466,12 +561,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+        if self.public_blocked(path):
+            return self.send_error(404)
+        if path.startswith(("/api/public/", "/api/payments/webhook/")):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > 64 * 1024:
+                    return self.send_json({"error": "Request is too large"}, 413)
+                return self.public_post(path, self.rfile.read(length) if length else b"")
+            except ordering.OrderingError as exc:
+                return self.send_json({"error": str(exc)}, exc.status)
+            except (ValueError, json.JSONDecodeError) as exc:
+                return self.send_json({"error": str(exc) or "Invalid request"}, 400)
         if path.startswith("/api/"):
             try:
                 body = self.read_json()
                 return self.api_post(path, body)
             except NotFound:
                 return self.send_json({"error": "Not found"}, 404)
+            except ordering.OrderingError as exc:
+                return self.send_json({"error": str(exc)}, exc.status)
             except sqlite3.IntegrityError as exc:
                 if "users.username" in str(exc):
                     return self.send_json({"error": "That username is already taken"}, 409)
@@ -485,6 +594,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = urllib.parse.urlparse(self.path).path
+        if self.public_blocked(path):
+            return self.send_error(404)
         try:
             body = self.read_json()
             return self.api_put(path, body)
@@ -495,6 +606,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path
+        if self.public_blocked(path):
+            return self.send_error(404)
         try:
             return self.api_delete(path)
         except NotFound:
@@ -518,6 +631,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             path = "/index.html"
+        elif path == "/order":
+            path = "/order.html"
+        elif path == "/pay/mock":
+            path = "/mockpay.html"
         candidate = (STATIC / path.lstrip("/")).resolve()
         if STATIC.resolve() not in candidate.parents and candidate != STATIC.resolve():
             return self.send_error(403)
@@ -534,7 +651,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_get(self, path):
         with connect() as db:
             if path == "/api/status":
-                count = db.execute("SELECT count(*) FROM users").fetchone()[0]
+                count = db.execute("SELECT count(*) FROM users WHERE username!=?", (ordering.QR_USERNAME,)).fetchone()[0]
                 return self.send_json({"setup_required": count == 0, "user": self.user(), "time": now_iso()})
             if path == "/api/session":
                 return self.send_json({"user": self.user()})
@@ -545,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
                 rows = db.execute("SELECT * FROM products WHERE active=1 ORDER BY category,name").fetchall()
                 return self.send_json([as_dict(r) for r in rows])
             if path == "/api/orders":
-                rows = db.execute("SELECT o.*,u.display_name AS created_by_name,c.display_name AS cashier_name FROM orders o JOIN users u ON u.id=o.created_by LEFT JOIN users c ON c.id=o.cashier_id ORDER BY o.id DESC LIMIT 300").fetchall()
+                rows = db.execute("SELECT o.*,u.display_name AS created_by_name,c.display_name AS cashier_name,t.name AS table_name FROM orders o JOIN users u ON u.id=o.created_by LEFT JOIN users c ON c.id=o.cashier_id LEFT JOIN dining_tables t ON t.id=o.table_id ORDER BY o.id DESC LIMIT 300").fetchall()
                 result = [as_dict(r) for r in rows]
                 for row in result:
                     row["items"] = [as_dict(x) for x in db.execute("SELECT * FROM order_items WHERE order_id=? ORDER BY id", (row["id"],)).fetchall()]
@@ -556,27 +673,44 @@ class Handler(BaseHTTPRequestHandler):
                 rows = db.execute("SELECT e.*,u.display_name AS paid_by_name FROM expenses e LEFT JOIN users u ON u.id=e.paid_by ORDER BY e.id DESC LIMIT 500").fetchall()
                 return self.send_json([as_dict(r) for r in rows])
             if path == "/api/summary":
-                day = datetime.now(business_zone()).date().isoformat()
-                paid = db.execute("SELECT COUNT(*) n,COALESCE(SUM(total_cents),0) total FROM orders WHERE status='paid' AND substr(paid_at,1,10)=?", (day,)).fetchone()
-                by_method = db.execute("SELECT payment_method,COUNT(*) n,COALESCE(SUM(total_cents),0) total FROM orders WHERE status='paid' AND substr(paid_at,1,10)=? GROUP BY payment_method", (day,)).fetchall()
-                expenses = db.execute("SELECT COALESCE(SUM(amount_cents),0) FROM expenses WHERE substr(created_at,1,10)=?", (day,)).fetchone()[0]
                 open_orders = db.execute("SELECT COUNT(*) FROM orders WHERE status='open'").fetchone()[0]
+                day = business_now().date().isoformat()
                 if user["role"] != "owner":
                     return self.send_json({"date":day,"open_orders":open_orders})
-                return self.send_json({"date": day, "orders": paid["n"], "sales_cents": paid["total"], "expenses_cents": expenses,
-                                       "net_cents": paid["total"]-expenses, "open_orders": open_orders,
-                                       "by_method": [as_dict(r) for r in by_method]})
+                # Same figures as the settlement: sales on the day paid, refunds on the day refunded.
+                report = ordering.settlement(db, business_now, day)
+                return self.send_json({"date": day, "orders": report["sales_count"], "sales_cents": report["gross_sales_cents"],
+                                       "refunds_cents": report["refunds_cents"], "expenses_cents": report["expenses_cents"],
+                                       "net_cents": report["net_after_expenses_cents"], "open_orders": open_orders,
+                                       "by_method": [{"payment_method": m["method"], "n": m["sales_count"], "total": m["net_cents"]} for m in report["by_method"]]})
+            if path == "/api/tables":
+                if user["role"] != "owner":
+                    return self.send_json({"error": "Owner access required"}, 403)
+                return self.send_json(ordering.list_tables(db))
+            if path in ("/api/settlement", "/api/settlement/export"):
+                if user["role"] != "owner":
+                    return self.send_json({"error": "Owner access required"}, 403)
+                try:
+                    report = ordering.settlement(db, business_now, (getattr(self, "query", {}).get("day") or [""])[0])
+                except ordering.OrderingError as exc:
+                    return self.send_json({"error": str(exc)}, exc.status)
+                if path.endswith("/export"):
+                    return self.send_bytes(ordering.settlement_csv(report), "text/csv; charset=utf-8",
+                                           {"Content-Disposition": f"attachment; filename=kedai-pos-settlement-{report['day']}.csv"})
+                return self.send_json(report)
             if path == "/api/settings":
                 values = {r["key"]: json.loads(r["value"]) for r in db.execute("SELECT * FROM settings")}
                 values["google_secret_configured"] = bool(values.pop("google_client_secret", ""))
                 values.pop("google_refresh_token", None)
+                values.pop("mock_gateway_secret", None)
+                values["payment_methods"] = [{"id": k, "label": v["label"], "online": v["online"]} for k, v in ordering.METHODS.items()]
                 if user["role"] != "owner":
                     values={k:v for k,v in values.items() if k in {"shop_name","shop_address","shop_phone","language","currency","timezone","merchant_qr","tax_enabled","tax_label","tax_rate"}}
                 return self.send_json(values)
             if path == "/api/users":
                 if user["role"] != "owner":
                     return self.send_json({"error": "Owner access required"}, 403)
-                return self.send_json([as_dict(r) for r in db.execute("SELECT id,username,display_name,role,active,created_at FROM users ORDER BY id")])
+                return self.send_json([as_dict(r) for r in db.execute("SELECT id,username,display_name,role,active,created_at FROM users WHERE username!=? ORDER BY id", (ordering.QR_USERNAME,))])
             if path == "/api/audit":
                 if user["role"] != "owner":
                     return self.send_json({"error": "Owner access required"}, 403)
@@ -617,7 +751,7 @@ class Handler(BaseHTTPRequestHandler):
         global GOOGLE_TOKEN_CACHE
         with DB_LOCK, connect() as db:
             if path == "/api/setup":
-                if db.execute("SELECT count(*) FROM users").fetchone()[0]:
+                if db.execute("SELECT count(*) FROM users WHERE username!=?", (ordering.QR_USERNAME,)).fetchone()[0]:
                     return self.send_json({"error": "Setup has already been completed"}, 409)
                 username = str(body.get("username", "owner")).strip().lower()
                 display = str(body.get("display_name", "Owner")).strip() or "Owner"
@@ -733,9 +867,18 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/settings":
                 if user["role"] != "owner":
                     return self.send_json({"error":"Owner access required"},403)
-                allowed={"shop_name","shop_address","shop_phone","language","currency","timezone","merchant_qr","tax_enabled","tax_label","tax_rate","google_client_id","google_client_secret","google_sheet_id","sheet_sync_enabled","sheets_import_products","sheets_import_expenses"}
+                allowed={"shop_name","shop_address","shop_phone","language","currency","timezone","merchant_qr","tax_enabled","tax_label","tax_rate","google_client_id","google_client_secret","google_sheet_id","sheet_sync_enabled","sheets_import_products","sheets_import_expenses","qr_ordering_enabled","qr_payment_methods","public_base_url"}
                 for key,val in body.items():
                     if key in allowed:
+                        if key == "qr_ordering_enabled":
+                            val = bool(val)
+                        if key == "qr_payment_methods":
+                            if not isinstance(val, list) or not all(m in ordering.ONLINE_METHODS for m in val):
+                                return self.send_json({"error":"Unknown payment method"},400)
+                        if key == "public_base_url":
+                            val = str(val).strip().rstrip("/")
+                            if val and urllib.parse.urlsplit(val).scheme != "https":
+                                return self.send_json({"error":"The public address must start with https://"},400)
                         if key == "tax_rate":
                             val = finite_number(val, "Tax rate", 0, 100)
                         if key == "language" and val not in ("zh", "en", "ms"):
@@ -801,19 +944,17 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/orders/") and path.endswith("/refund"):
                 if user["role"] != "owner":
                     return self.send_json({"error":"Owner access required"},403)
-                oid=path_id(path,3);db.execute("BEGIN IMMEDIATE")
-                order=db.execute("SELECT * FROM orders WHERE id=?",(oid,)).fetchone()
-                if not order:
-                    db.rollback();return self.send_json({"error":"Order not found"},404)
-                if order["status"]!="paid":
-                    db.rollback();return self.send_json({"error":"Only paid orders can be recorded as refunded"},409)
-                refunded=now_iso();note=str(body.get("note",""))[:300]
-                db.execute("UPDATE orders SET status='refunded',refunded_at=?,refund_note=? WHERE id=? AND status='paid'",(refunded,note,oid))
-                for line in db.execute("SELECT product_id,quantity FROM order_items WHERE order_id=?",(oid,)).fetchall():
-                    if line["product_id"] is not None:
-                        db.execute("UPDATE products SET stock=stock+?,updated_at=? WHERE id=?",(line["quantity"],refunded,line["product_id"]))
-                audit(db,user["id"],"refund","order",oid,{"note":note,"amount_cents":order["total_cents"]})
-                db.commit();return self.send_json({"ok":True,"refunded_at":refunded})
+                return self.send_json(ordering.refund_order(db, setting, now_iso, audit, path_id(path,3), user["id"], body))
+            if path == "/api/tables":
+                if user["role"] != "owner":
+                    return self.send_json({"error":"Owner access required"},403)
+                table = ordering.create_table(db, str(body.get("name","")), now_iso)
+                audit(db,user["id"],"create","table",table["id"],{"name":table["name"]})
+                return self.send_json(table, 201)
+            if path == "/api/settlement/close":
+                if user["role"] != "owner":
+                    return self.send_json({"error":"Owner access required"},403)
+                return self.send_json(ordering.close_day(db, business_now, now_iso, audit, user["id"], body))
         return self.send_json({"error":"Not found"},404)
 
     def save_image(self, data):
@@ -905,12 +1046,22 @@ class Handler(BaseHTTPRequestHandler):
                            (name,str(body.get("category",row["category"])),str(body.get("sku",row["sku"])),price,stock,image,now_iso(),pid))
                 audit(db,user["id"],"update","product",pid,{"name":name})
                 return self.send_json({"ok":True})
+            if path.startswith("/api/tables/"):
+                if user["role"]!="owner":return self.send_json({"error":"Owner access required"},403)
+                tid=path_id(path,3)
+                if not db.execute("SELECT 1 FROM dining_tables WHERE id=?",(tid,)).fetchone():return self.send_json({"error":"Table not found"},404)
+                if "name" in body and str(body["name"]).strip():
+                    db.execute("UPDATE dining_tables SET name=? WHERE id=?",(str(body["name"]).strip()[:40],tid))
+                if "active" in body:
+                    db.execute("UPDATE dining_tables SET active=? WHERE id=?",(1 if body["active"] else 0,tid))
+                audit(db,user["id"],"update","table",tid,{k:body[k] for k in ("name","active") if k in body})
+                return self.send_json({"ok":True})
             if path.startswith("/api/users/"):
                 if user["role"]!="owner":return self.send_json({"error":"Owner access required"},403)
                 uid=path_id(path,3)
                 if uid==user["id"]:return self.send_json({"error":"Use another owner to disable this account"},400)
                 active=1 if body.get("active",True) else 0
-                db.execute("UPDATE users SET active=? WHERE id=? AND role='staff'",(active,uid))
+                db.execute("UPDATE users SET active=? WHERE id=? AND role='staff' AND username!=?",(active,uid,ordering.QR_USERNAME))
                 audit(db,user["id"],"update","staff",uid,{"active":active})
                 return self.send_json({"ok":True})
         return self.send_json({"error":"Not found"},404)

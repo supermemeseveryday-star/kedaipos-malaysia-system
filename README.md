@@ -4,7 +4,7 @@
 
 Run it on one shop computer. Staff then take orders and payments from that computer, an iPad or a phone over the shop's Wi-Fi. No monthly fee, no cloud account, and checkout keeps working when the internet is down.
 
-Bahasa Melayu · English · 简体中文 · Cash and DuitNow QR · Receipts · Stock · Expenses · Daily reports
+Bahasa Melayu · English · 简体中文 · Cash and DuitNow QR · **Scan-to-order with e-wallet, Apple Pay & Google Pay** · Receipts · Stock · Refunds · Live daily settlement
 
 ![Kedai POS checkout screen](docs/screenshots/02-checkout.png)
 
@@ -32,6 +32,8 @@ Bahasa Melayu · English · 简体中文 · Cash and DuitNow QR · Receipts · S
   6. [Orders and receipts](#6-orders-and-receipts)
   7. [Stock and expenses](#7-stock-and-expenses)
   8. [Daily report and backup](#8-daily-report-and-backup)
+  9. [Scan-to-order: customers order and pay on their phone](#9-scan-to-order-customers-order-and-pay-on-their-phone)
+  10. [Refunds and daily settlement](#10-refunds-and-daily-settlement)
 - [Who can do what](#who-can-do-what)
 - [FAQ](#faq)
 - [More documentation](#more-documentation)
@@ -141,6 +143,39 @@ Press **Download backup (ZIP)** regularly and keep the file somewhere safe, such
 
 ![Daily report](docs/screenshots/10-reports.png)
 
+### 9. Scan-to-order: customers order and pay on their phone
+
+Customers don't need an app or an account. Ming sits at Table 3 in your tai chow, scans the QR code on the table, picks the fried bihun, and pays with Touch 'n Go, GrabPay, Boost, ShopeePay, Apple Pay, Google Pay, a card or FPX. The order appears in **Orders** on the POS with a "Scan order · Table 3" tag and a beep, already paid.
+
+![Customer ordering on a phone: menu, cart and payment, payment successful](docs/screenshots/14-scan-to-order.png)
+
+Set it up in **Settings → Scan-to-order**:
+
+1. Tick **Turn on scan-to-order** and choose which payment methods customers may use.
+2. Add your tables (e.g. "Table 1", "Takeaway"). Each gets its own QR code. Use **Print all QR codes** and stick them on the tables.
+3. So customers can open the menu on mobile data, give the shop computer a public address with [Cloudflare Tunnel](kedai-pos/README.md#scan-to-order-and-online-payments) (free) and enter it as the **public address**. Internet visitors can only reach the customer menu; the POS itself stays on your shop network.
+
+Orders reach the POS **only after payment succeeds**, so there are no unpaid "ghost" orders. If an item sells out while the customer is paying, the payment is refunded automatically.
+
+> **Test mode.** Payments currently run through a built-in *simulated* gateway, and customers are not charged. Before taking real money, the shop needs a merchant account with a payment gateway (for example Fiuu, Stripe or iPay88), which then needs to be connected. See [kedai-pos/README.md](kedai-pos/README.md#scan-to-order-and-online-payments).
+
+### 10. Refunds and daily settlement
+
+**Refunds:** on a paid order, the owner presses **Record refund** and enters the amount (full or partial) and a reason.
+- Online payments are refunded to the customer through the payment gateway.
+- For cash or DuitNow, hand the money back first, then record it.
+- A full refund can put the items back in stock.
+
+**Settlement** (owner only) shows a business day, updated live:
+- Gross sales, refunds and net sales.
+- A breakdown by payment method.
+- How much cash should be in the drawer.
+- Every sale and refund with its receipt number and gateway reference.
+
+Sales count on the day they were paid and refunds on the day they were made, so a refund never changes a day that's already closed. At closing time, enter the cash counted to record the day and its variance. Press **Export CSV** to send the day to your accountant.
+
+![Daily settlement](docs/screenshots/15-settlement.png)
+
 ---
 
 ## Who can do what
@@ -150,9 +185,9 @@ Press **Download backup (ZIP)** regularly and keep the file somewhere safe, such
 | Take orders and payments (cash / DuitNow QR) | ✅ | ✅ |
 | View orders and print receipts | ✅ | ✅ |
 | Add and edit products, prices and stock | ✅ | — |
-| Void open orders, record refunds | ✅ | — |
-| Expenses, reports and backup | ✅ | — |
-| Shop settings, staff accounts, Google Sheets | ✅ | — |
+| Void open orders, record full or partial refunds | ✅ | — |
+| Expenses, reports, settlement and backup | ✅ | — |
+| Shop settings, staff accounts, tables & QR codes, Google Sheets | ✅ | — |
 
 ---
 
@@ -170,6 +205,12 @@ Yes. Most USB/Bluetooth scanners type like a keyboard and press Enter after each
 **Someone keeps guessing passwords. What happens?**
 After 5 wrong passwords for an account within 15 minutes, that device is locked out of that account for a while. Every failed attempt is recorded.
 
+**Do customers need to download an app or sign up?**
+No. They scan the table's QR code with the phone camera and the menu opens in the browser.
+
+**Does scan-to-order work when the shop's internet is down?**
+No. Customers' phones reach the shop computer over the internet, and payments need the gateway. Counter checkout keeps working offline as usual.
+
 **Is this certified e-Invoice / MyInvois or SST software?**
 No. It is a simple shop POS. Check with your accountant and the [LHDN e-Invoice](https://www.hasil.gov.my/e-invois/) rules for what your business needs.
 
@@ -179,6 +220,7 @@ No. It is a simple shop POS. Check with your accountant and the [LHDN e-Invoice]
 
 See **[kedai-pos/README.md](kedai-pos/README.md)** for:
 
+- Scan-to-order setup: Cloudflare Tunnel, security model, connecting a real payment gateway
 - Google Sheets sync setup
 - Restoring from a backup
 - Environment variables (port, data folder, timezone)

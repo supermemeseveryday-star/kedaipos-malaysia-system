@@ -21,33 +21,45 @@ class Client:
         self.base = base
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, headers=None):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json", **(headers or {})})
         try:
             with self.opener.open(req, timeout=10) as res:
-                return res.status, json.loads(res.read() or b"{}")
+                raw = res.read()
+                return res.status, (json.loads(raw or b"{}") if "json" in res.headers.get("Content-Type", "") else raw)
         except urllib.error.HTTPError as exc:
-            return exc.code, json.loads(exc.read() or b"{}")
+            raw = exc.read()
+            try:
+                return exc.code, json.loads(raw or b"{}")
+            except ValueError:
+                return exc.code, raw
+
+
+def start_server_and_sign_in():
+    """Starts a test server and signs in the owner and staff member "ali". Test modules share one database."""
+    server.init_db()
+    httpd = server.Server(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    owner, staff = Client(base), Client(base)
+    status, _ = owner.call("POST", "/api/setup", {"username": "owner", "display_name": "Boss", "password": "password123"})
+    if status == 409:
+        status, _ = owner.call("POST", "/api/login", {"username": "owner", "password": "password123"})
+    assert status == 200
+    status, _ = owner.call("POST", "/api/users", {"username": "ali", "display_name": "Ali", "password": "password123"})
+    assert status in (201, 409)
+    status, _ = staff.call("POST", "/api/login", {"username": "ali", "password": "password123"})
+    assert status == 200
+    return httpd, base, owner, staff
 
 
 class ApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        server.init_db()
-        cls.httpd = server.Server(("127.0.0.1", 0), server.Handler)
-        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
-        base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
-        cls.owner = Client(base)
-        cls.staff = Client(base)
+        cls.httpd, base, cls.owner, cls.staff = start_server_and_sign_in()
         cls.anon = Client(base)
-        status, _ = cls.owner.call("POST", "/api/setup", {"username": "owner", "display_name": "Boss", "password": "password123"})
-        assert status == 200
-        status, _ = cls.owner.call("POST", "/api/users", {"username": "ali", "display_name": "Ali", "password": "password123"})
-        assert status == 201
-        status, _ = cls.staff.call("POST", "/api/login", {"username": "ali", "password": "password123"})
-        assert status == 200
 
     @classmethod
     def tearDownClass(cls):
